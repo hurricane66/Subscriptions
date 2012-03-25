@@ -1,0 +1,11 @@
+; $id$
+name = Subscriptions
+description = User subscriptions on content types
+package = Other
+version = VERSION
+core = 6.x
+
+; Information added by drupal.org packaging script on 2011-05-25
+version = "6.x.1.0"
+project = "drupal"
+

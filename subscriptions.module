@@ -1,0 +1,233 @@
+<?php
+// $id$
+
+/**
+ * Implementation of hook_menu().
+ */
+function subscriptions_menu() {
+  $items['subscriptions/%user'] = array(
+    'title' => t('Subscriptions settings'),
+    'description' => t('Set your subscriptions'),
+    'page callback' => 'subscription_form',
+    'page arguments' => array(1),
+    'access arguments' => array('access content'),
+    'type' => MENU_NORMAL_ITEM,
+    'file' => 'subscriptions.admin.inc',
+  );
+  return $items;
+}
+
+/**
+ * Implementation of hook_nodeapi().
+ */
+function subscriptions_nodeapi(&$node, $op, $teaser, $page) {
+  global $user;
+  $subscription_types = array();
+  switch ($op) {
+	case 'insert':
+    //dsm('Nid for the new node is: ' . $node->nid);
+    $subscription_types = get_subscription_types();
+    if (array_key_exists($node->type, $subscription_types) && $node->status == "1") {
+      db_query("INSERT INTO {subscriptions_queue} (nid, created) VALUES (%d, %d)", $node->nid, time() + 3600);
+    }
+    break;
+    
+  case 'update':
+    $subscription_types = get_subscription_types();
+    if (array_key_exists($node->type, $subscription_types)) {	
+      // Check to see if node is published or not
+      if ($node->status == "1") { 
+        // The node is published. Update the subscriptions table
+        //dsm($node);
+        db_query("DELETE FROM {subscriptions_queue} WHERE nid = %d", $node->nid);
+        db_query("INSERT INTO {subscriptions_queue} (nid, created) VALUES (%d, %d)", $node->nid, time() + 3600);
+      }
+      // The node is not published. Delete it from the subscriptions table
+      else {
+        db_query("DELETE FROM {subscriptions_queue} WHERE nid = %d", $node->nid);      
+      }
+    }
+    break;
+    
+  case 'view':
+		//dsm($node);	
+		break;
+  }
+}
+
+/**
+* Implementation of hook_cron
+*/
+function subscriptions_cron() {
+  run_subscriptions();
+  dsm('hook_cron ran successfully!');
+}
+
+function run_subscriptions() {
+  //dsm(time());
+  $result = db_query("SELECT nid FROM {subscriptions_queue} WHERE created <= " . (time()));
+  // Iterera genom alla noder som går att prenumerera på och som publicerats för minst 60 minuter sedan.
+  while($row = mysqli_fetch_array($result)) {
+    $thenid = $row[0];
+    
+    //dsm($row);
+    //dsm('nid is ' . $thenid);
+    
+    //$uids[] = $row[0];
+    $subscription_node = node_load(array("nid" => $thenid), NULL, TRUE);
+    
+    //dsm('Node object:');
+    //dsm($subscription_node);
+
+    $node_path = $subscription_node->path;
+    $node_title = $subscription_node->title;
+    // Tar hand om specialfallet är innehållstypen är Purshase & Logistics som bara publiceras på engelska. RN 12-03-19
+    if (($subscription_node->language == "") || ($subscription_node->type == "pl_content")) {
+      $node_language = 'none';
+    }
+    else {
+      $node_language = $subscription_node->language;
+    }
+    
+    if ((!$subscription_node->og_public) && (is_null($subscription_node->og_public) != 1)) {
+      $subscription_node_groups = array();
+      $subscription_node_groups = $subscription_node->og_groups;
+      
+      //dsm($subscription_node_groups);
+
+      $result2 = db_query("SELECT uid FROM {subscriptions} WHERE contenttype='" . $subscription_node->type . "'");
+      $uids = array();
+      while($row = mysqli_fetch_array($result2)) {
+      
+        //$uid = $row[0];
+        //dsm('User (uid) subscribing to this content type: ' . $value);
+
+        $subscribing_user = user_load($row[0]);
+        
+        //dsm('Subscribing user is (the user object of):');
+        //dsm($subscribing_user);
+        
+        if ($node_language == 'none' || $node_language == $subscribing_user->language) {
+
+          if ($node_language == 'none') {
+            $lang_prefix = $subscribing_user->language;
+          }
+          else {
+            $lang_prefix = $node_language;
+          }
+          $subscribing_user_node_path = $lang_prefix . '/' . $node_path;
+
+          //dsm('uid for subscribing user is ' . $subscribing_user->uid);        
+
+          $user_og_groups = array();
+          $user_og_groups = $subscribing_user->og_groups;
+          
+          //dsm('OG groups for user ' .  $value);
+          //dpm($user_og_groups);
+          
+          foreach($subscription_node_groups as $gid => $group) {
+            
+            //dpm('The group id is: ' . $gid);
+            //dpm('The group id for the node ' . $thenid . ' beeing processed is ' . $gid);
+            //dpm('The user has group permission to the node. Group id is:');
+            //dpm(array_key_exists($gid, $user_og_groups));
+            
+            if (array_key_exists($gid, $user_og_groups)) {
+              send_subscription_mail($subscribing_user_node_path, $subscribing_user->language, $subscribing_user->mail, $node_title);
+              watchdog('Subscription', 'A subscription mail was sent to user ' . $subscribing_user->name . ' with uid ' . $subscribing_user->uid . ' subscribing to node ' . $subscription_node->nid . ' of type ' . $subscription_node->type, array(), WATCHDOG_INFO);
+              
+              //dsm('Node path is ' . $subscribing_user_node_path);          
+              //dpm('Send a subscription mail to user: ' . $subscribing_user->name);
+              //dpm($user_og_groups[$gid]);
+              
+              break;
+            }
+            else {
+              //dpm('No og match between the current processed user gid and the list of gids belonging to the node.');
+            }
+          }
+        }
+        else {
+          //dsm('User language didn\'t match the language of the node.');
+        }
+      }
+    }
+    else {
+      // The node is public. Send mail notice to all subscribers if language neutral, else to all with the nodes language 
+      $result2 = db_query("SELECT uid FROM {subscriptions} WHERE contenttype='" . $subscription_node->type . "'");
+      //$uids = array();
+      while($row = mysqli_fetch_array($result2)) {
+        //$uid = $row[0];
+        //dsm('User (uid) subscribing to this content type: ' . $value);
+        $subscribing_user = user_load($row[0]);
+        
+        //dsm($subscribing_user);
+        
+        if ($node_language == 'none' || $node_language == $subscribing_user->language) {
+          if ($node_language == 'none') {
+            $lang_prefix = $subscribing_user->language;
+          }
+          else {
+            $lang_prefix = $node_language;
+          }
+          $subscribing_user_node_path = $lang_prefix . '/' . $node_path;
+          
+          //dsm('Node path is ' . $subscribing_user_node_path);
+          
+          send_subscription_mail($subscribing_user_node_path, $subscribing_user->language, $subscribing_user->mail, $node_title);
+          watchdog('Subscription', 'A subscription mail was sent to user ' . $subscribing_user->name . ' with uid ' . $subscribing_user->uid . ' subscribing to node ' . $subscription_node->nid . ' of type ' . $subscription_node->type, array(), WATCHDOG_INFO);
+          
+          //dpm('Content is public, and this user have the same language as the content or the contents is language neutral.');
+        }
+        else {
+          //dpm('Content is public, but this user doesn\'t have the same language as the content.');
+        }
+      }
+    }
+    // All subscribers has been notified. Delete the node from the subscription queue (table).
+    //dpm('Node with nid ' . $thenid . ' was deleted from the subscription queue table.');
+    db_query("DELETE FROM {subscriptions_queue} WHERE nid=%d", $thenid);
+  } 
+}	
+
+function send_subscription_mail($node_path, $user_language, $user_mail, $node_title) {
+  global $base_url;
+
+  if ($user_language == 'sv') {
+    $subject = utf8_encode('Uppdaterat innehåll på PMCnet');
+		$message = utf8_encode("<p>Du har fått detta meddelande som prenumerant på PMCnet.<br>Det finns nytt eller ändrat innehåll på PMCnet.<p>");
+		$message .= utf8_encode("<p>Använd <a href='" . $base_url . "/" . $node_path . "'>denna länk</a> för att komma direkt till innehållet, eller kopiera länkens adress nedan och klistra in den i din webbläsares adressfält.</p>");
+		$message .= $base_url . "/" . $node_path;
+  } 
+  else {
+    $subject = 'Updated content on PMCnet';
+		$message = "<p>You get this message as a subscriber on PMCnet.<br>New or updated content has been added.";
+		$message .= "<p>Please use <a href='" . $base_url . "/" . $node_path . "'>this link</a> to go straight to the content, or copy the complete link address below and paste in into the address field of your web browser</p>";
+    $message .= $base_url . "/" . $node_path;
+  }
+  $sender_mail = variable_get('site_mail', '');
+  // Send mail
+  mimemail($sender_mail, $user_mail, $subject, $message);
+}
+
+function get_subscription_types() {
+  $subscription_types = array(
+    'cc_content' => t('Corporate Communications'),
+    'fa_content' => t('Finance'), 
+    'hr_content' => t('HR'), 
+    'it_content' => t('IT'), 
+    'ms_content' => t('Marketing & Sales'), 
+    'pmcgroup_content' => t('PMCnet Startpages'), 
+    'products_content' => t('Products'), 
+    'pis_content' => t('Purchase Indirect & Services'), 
+    'pl_content' => t('Purchasing & Logistics'), 
+    'qlikview_content' => t('Qlikview'),
+    'qe_content' => t('Quality & Environmental'),
+    'tech_content' => t('Technology'),
+    'vacancy' => t('Vacancy'), 
+    'news_content' => t('News & Info'),
+    'note_content' => t('Notes'),    
+  );
+  //$subscription_types = array('page' => t('Page'));
+  return $subscription_types;
+}
