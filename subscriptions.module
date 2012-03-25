@@ -110,7 +110,13 @@ function run_subscriptions() {
         if ($node_language == 'none' || $node_language == $subscribing_user->language) {
 
           if ($node_language == 'none') {
-            $lang_prefix = $subscribing_user->language;
+            // pl_content should have only prefix en RN 12-03-25 
+            if ($subscription_node->type == "pl_content") {
+              $lang_prefix = 'en';
+            }
+            else {
+              $lang_prefix = $subscribing_user->language;
+            }
           }
           else {
             $lang_prefix = $node_language;
